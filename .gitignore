@@ -210,3 +210,5 @@ __marimo__/
 .pgadmin_data/
 .nginx_conf/
 data/.example_html/
+
+data/*.csv

@@ -212,4 +212,4 @@ __marimo__/
 data/.example_html/
 
 data/*.csv
-.mushroom_model.pkl
+mushroom_model.pkl

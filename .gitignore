@@ -204,12 +204,47 @@ marimo/_lsp/
 __marimo__/
 
 
-# local data
+# ========================
+# ML PROJECT SPECIFIC
+# ========================
 
+# Data files
+data/
+*.csv
+*.json
+*.parquet
+*.xlsx
+*.feather
+
+# Model files
+*.pkl
+*.pickle
+*.joblib
+*.h5
+*.model
+*.pth
+*.pt
+mushroom_model.pkl
+
+# Training logs and checkpoints
+logs/
+checkpoints/
+runs/
+outputs/
+results/
+
+# Local databases and configs
 .postgres_data/
 .pgadmin_data/
 .nginx_conf/
 data/.example_html/
 
-data/*.csv
-mushroom_model.pkl
+# Large files and temporary files
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Local development files
+local_config.py
+config.local.yaml

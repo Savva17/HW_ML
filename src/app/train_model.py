@@ -9,11 +9,13 @@ import joblib
 # 1. Загружаем датасет
 # -------------------------------
 df = pd.read_csv('data/train.csv')
-df = df.sample(n=500, random_state=42)
-print(f"📊 Загружено {len(df)} записей (случайная выборка)")
+df_small = df.sample(n=500, random_state=42)
+print(f"📊 Загружено {len(df_small)} записей (случайная выборка)")
 
-X = df.drop('class', axis=1)
-y = df['class']
+df_small.to_csv('data/train_sample.csv', index=False)
+
+X = df_small.drop('class', axis=1)
+y = df_small['class']
 
 # -------------------------------
 # 2. Препроцессинг

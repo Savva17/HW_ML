@@ -1,14 +1,16 @@
+from typing import List
 import uvicorn
-from fastapi import FastAPI, HTTPException
+import joblib
 import pandas as pd
 
+from fastapi import FastAPI, HTTPException, Depends
 from ..utils.model_config_fit import model_config
-
 from .schemas import (
     MushroomFeatures, PredictionResponse, ProbabilityResponse,
     BatchPredictionRequest, BatchPredictionResponse, BatchProbabilityResponse,
     StatusResponse, FitResponse
 )
+from .config import FEATURE_COLUMNS
 
 
 app = FastAPI(
@@ -18,134 +20,228 @@ app = FastAPI(
 )
 
 
-# ---------------------- STARTUP ----------------------
+def mushroom_to_row(m: MushroomFeatures) -> dict:
+    """
+    Создаёт словарь всех FEATURE_COLUMNS.
+    Меняем только cap-color и habitat,
+    остальные оставляем None — OneHotEncoder(handle_unknown='ignore') это поддерживает.
+    """
+    row = {col: None for col in FEATURE_COLUMNS}
+    row["id"] = 0
+    row["cap-color"] = m.cap_color
+    row["habitat"] = m.habitat
+    return row
+
+
+def mushrooms_to_df(mushrooms: List[MushroomFeatures]) -> pd.DataFrame:
+    rows = [mushroom_to_row(m) for m in mushrooms]
+    return pd.DataFrame(rows, columns=FEATURE_COLUMNS)
+
+
 @app.on_event("startup")
-async def startup_event():
-    model_config.load_model()
+def startup():
+    loaded = model_config.load_model()
 
 
 @app.get("/")
-async def root():
-    return {"message": "Mushroom Classification API работает!"}
+async def home():
+    return {"message": "Mushroom API работает!"}
 
 
-# ---------------------- Вспомогательная функция ----------------------
-def encode_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Кодирует признаки гриба с помощью сохранённых LabelEncoder."""
-    encoded = df.copy()
-
-    for col in encoded.columns:
-        if col in model_config.label_encoders:
-            le = model_config.label_encoders[col]
-            encoded[col] = encoded[col].apply(
-                lambda x: le.transform([x])[0] if x in le.classes_ else 0
-            )
-
-    return encoded
-
-
-# ---------------------- PREDICT ----------------------
 @app.get("/predict", response_model=PredictionResponse)
-async def predict(features: MushroomFeatures):
+def predict(mushroom: MushroomFeatures = Depends()):
+    """
+    Предсказание ядовитости гриба
+    
+    Параметры передаются в query string:
+    - cap_color: цвет шляпки (пример: n, b, w, y)
+    - habitat: среда обитания (пример: u, g, d)
+    
+    Пример запроса: /predict?cap_color=n&habitat=u
+    """
     if not model_config.is_ready():
-        raise HTTPException(status_code=500, detail="Модель не загружена")
+        raise HTTPException(500, "Модель не загружена")
 
     try:
-        df = pd.DataFrame([features.dict()])
-        df = encode_features(df)
+        df = mushrooms_to_df([mushroom])
+        pred = int(model_config.model.predict(df)[0])
+        label = "poisonous" if pred == 1 else "edible"
 
-        pred = model_config.model.predict(df)[0]
+        return PredictionResponse(prediction=pred, prediction_label=label)
 
-        return PredictionResponse(
-            prediction=int(pred),
-            prediction_label="ядовитый" if pred == 1 else "съедобный"
-        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка предсказания: {str(e)}")
+        raise HTTPException(500, f"Ошибка предсказания: {str(e)}")
 
 
-# ---------------------- PREDICT PROBA ----------------------
 @app.get("/predict_proba", response_model=ProbabilityResponse)
-async def predict_proba(features: MushroomFeatures):
+def predict_proba(mushroom: MushroomFeatures = Depends()):
+    """
+    Определение вероятности ядовитости гриба
+    
+    Возвращает вероятность того, что гриб ядовитый (класс 1),
+    а также бинарное предсказание на основе порога 0.5.
+    
+    Параметры передаются в query string:
+    - cap_color: цвет шляпки (пример: n, b, w, y)
+    - habitat: среда обитания (пример: u, g, d)
+    
+    Пример запроса: 
+    GET /predict_proba?cap_color=n&habitat=u
+    
+    Возвращает:
+    - probability: вероятность ядовитости (от 0.0 до 1.0)
+    - prediction: бинарное предсказание (0 - съедобный, 1 - ядовитый)
+    - prediction_label: текстовая метка ('edible' или 'poisonous')
+    
+    Пример ответа:
+    {
+        "probability": 0.85,
+        "prediction": 1,
+        "prediction_label": "poisonous"
+    }
+    """
     if not model_config.is_ready():
-        raise HTTPException(status_code=500, detail="Модель не загружена")
+        raise HTTPException(500, "Модель не загружена")
 
     try:
-        df = pd.DataFrame([features.dict()])
-        df = encode_features(df)
+        df = mushrooms_to_df([mushroom])
 
-        proba = model_config.model.predict_proba(df)[0][1]
-        pred = 1 if proba > 0.5 else 0
+        if not hasattr(model_config.model, "predict_proba"):
+            raise HTTPException(500, "Модель не поддерживает predict_proba")
+
+        proba_p = float(model_config.model.predict_proba(df)[0][1])
+        pred = 1 if proba_p >= 0.5 else 0
+        label = "poisonous" if pred == 1 else "edible"
 
         return ProbabilityResponse(
-            probability=float(proba),
+            probability=proba_p,
             prediction=pred,
-            prediction_label="ядовитый" if pred == 1 else "съедобный"
+            prediction_label=label
         )
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка: {str(e)}")
+        raise HTTPException(500, f"Ошибка: {str(e)}")
 
 
-# ---------------------- PREDICT BATCH ----------------------
 @app.post("/predict_batch", response_model=BatchPredictionResponse)
-async def predict_batch(request: BatchPredictionRequest):
+def predict_batch(request: BatchPredictionRequest):
+    """
+    Пакетное предсказание ядовитости для нескольких грибов
+    
+    Принимает список грибов и возвращает предсказания для каждого.
+    
+    Тело запроса (JSON):
+    - mushrooms: список объектов с признаками грибов
+    
+    Пример тела запроса:
+    {
+        "mushrooms": [
+            {"cap_color": "n", "habitat": "u"},
+            {"cap_color": "y", "habitat": "g"},
+            {"cap_color": "w", "habitat": "d"}
+        ]
+    }
+    
+    Возвращает:
+    - predictions: список бинарных предсказаний (0 - съедобный, 1 - ядовитый)
+    - prediction_labels: список текстовых меток ('edible' или 'poisonous')
+    
+    Пример ответа:
+    {
+        "predictions": [1, 0, 1],
+        "prediction_labels": ["poisonous", "edible", "poisonous"]
+    }
+    """
     if not model_config.is_ready():
-        raise HTTPException(status_code=500, detail="Модель не загружена")
+        raise HTTPException(500, "Модель не загружена")
 
     try:
-        df = pd.DataFrame([m.dict() for m in request.mushrooms])
-        df = encode_features(df)
-
-        preds = model_config.model.predict(df)
+        df = mushrooms_to_df(request.mushrooms)
+        preds = [int(x) for x in model_config.model.predict(df)]
+        labels = ["poisonous" if p == 1 else "edible" for p in preds]
 
         return BatchPredictionResponse(
-            predictions=[int(p) for p in preds],
-            prediction_labels=["ядовитый" if p == 1 else "съедобный" for p in preds]
+            predictions=preds,
+            prediction_labels=labels
         )
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка batch-предсказания: {str(e)}")
+        raise HTTPException(500, f"Ошибка batch-предсказания: {str(e)}")
 
 
-# ---------------------- PREDICT PROBA BATCH ----------------------
 @app.post("/predict_proba_batch", response_model=BatchProbabilityResponse)
-async def predict_proba_batch(request: BatchPredictionRequest):
+def predict_proba_batch(request: BatchPredictionRequest):
+    """
+    Пакетное определение вероятностей ядовитости для нескольких грибов
+    
+    Принимает список грибов и возвращает вероятности ядовитости для каждого,
+    а также бинарные предсказания на основе порога 0.5.
+    
+    Тело запроса (JSON):
+    - mushrooms: список объектов с признаками грибов
+    
+    Пример тела запроса:
+    {
+        "mushrooms": [
+            {"cap_color": "n", "habitat": "u"},
+            {"cap_color": "y", "habitat": "g"},
+            {"cap_color": "w", "habitat": "d"}
+        ]
+    }
+    
+    Возвращает:
+    - probabilities: список вероятностей ядовитости (от 0.0 до 1.0)
+    - predictions: список бинарных предсказаний (0 - съедобный, 1 - ядовитый)
+    - prediction_labels: список текстовых меток ('edible' или 'poisonous')
+    
+    Пример ответа:
+    {
+        "probabilities": [0.85, 0.23, 0.91],
+        "predictions": [1, 0, 1],
+        "prediction_labels": ["poisonous", "edible", "poisonous"]
+    }
+    """
     if not model_config.is_ready():
-        raise HTTPException(status_code=500, detail="Модель не загружена")
+        raise HTTPException(500, "Модель не загружена")
 
     try:
-        df = pd.DataFrame([m.dict() for m in request.mushrooms])
-        df = encode_features(df)
+        df = mushrooms_to_df(request.mushrooms)
 
-        probs = model_config.model.predict_proba(df)[:, 1]
-        preds = [1 if p > 0.5 else 0 for p in probs]
+        if not hasattr(model_config.model, "predict_proba"):
+            raise HTTPException(500, "Модель не поддерживает predict_proba")
+
+        raw_probs = model_config.model.predict_proba(df)[:, 1]
+
+        probabilities = [float(p) for p in raw_probs]
+        predictions = [1 if p >= 0.5 else 0 for p in probabilities]
+        labels = ["poisonous" if p == 1 else "edible" for p in predictions]
 
         return BatchProbabilityResponse(
-            probabilities=[float(p) for p in probs],
-            predictions=preds,
-            prediction_labels=["ядовитый" if p == 1 else "съедобный" for p in preds]
+            probabilities=probabilities,
+            predictions=predictions,
+            prediction_labels=labels
         )
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка batch-proba: {str(e)}")
+        raise HTTPException(500, f"Ошибка batch-proba: {str(e)}")
 
 
-# ---------------------- STATUS ----------------------
 @app.get("/status", response_model=StatusResponse)
 async def status():
     info = model_config.get_model_info()
     return StatusResponse(
-        model_loaded_date=info["model_loaded_date"],
-        status="готова" if info["is_loaded"] else "не загружена",
+        **info,
+        status="готова" if info["is_loaded"] else "не загружена"
     )
 
 
-# ---------------------- FIT ----------------------
 @app.post("/fit", response_model=FitResponse)
 async def fit():
     """
-    Переобучение модели на train.csv
+    Переобучение модели на train_sample.csv
     """
     try:
-        df = pd.read_csv("data/train.csv")
+        df = pd.read_csv("data/train_sample.csv")
         accuracy, trained_at = model_config.fit_from_dataframe(df)
 
         return FitResponse(
@@ -158,4 +254,4 @@ async def fit():
 
 
 if __name__ == "__main__":
-    uvicorn.run("src.app.main:app", host="127.0.0.1", port=8001, reload=True)
+    uvicorn.run("src.app.main:app", host="127.0.0.1", port=8002, reload=True)

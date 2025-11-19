@@ -1,125 +1,108 @@
 import os
-from datetime import datetime
-from typing import Optional, Dict, Any, List, Tuple
-
 import joblib
 import pandas as pd
+
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
+from datetime import datetime
 
 
 class ModelConfig:
-    """Конфигурация и управление моделью (загрузка, обучение, информация)."""
+    """
+    Класс для управления жизненным циклом ML-модели:
+    - загрузка модели;
+    - обучение модели;
+    - хранение информации о модели;
+    - предоставление статуса модели.
 
+    Модель сохраняется в формате .pkl и представляет собой sklearn Pipeline
+    с препроцессором (OneHotEncoder) и классификатором RandomForestClassifier.
+    """
     def __init__(self, model_path: str = "mushroom_model.pkl") -> None:
-        self.model_path: str = model_path
-
-        self.model: Optional[RandomForestClassifier] = None
-        self.label_encoders: Optional[Dict[str, LabelEncoder]] = None
-        self.features: Optional[List[str]] = None
-
-        self.model_loaded_date: Optional[str] = None
-        self.model_trained_date: Optional[str] = None
+        self.model_path = model_path
+        self.model: Pipeline | None = None
+        self.features: list[str] | None = None
+        self.model_loaded_date: str | None = None
+        self.model_trained_date: str | None = None
 
     def load_model(self) -> bool:
-        """Загрузка модели из файла pkl."""
+        """
+        Загружает обученную модель из файла .pkl.
+        """
+        if not os.path.exists(self.model_path):
+            print(f"Файл модели не найден: {self.model_path}")
+            return False
         try:
-            if not os.path.exists(self.model_path):
-                print(f"❌ Файл модели не найден: {self.model_path}")
-                return False
-
-            model_data = joblib.load(self.model_path)
-
-            self.model = model_data["model"]
-            self.label_encoders = model_data["label_encoders"]
-            # список признаков сохраняем в pkl при обучении
-            self.features = model_data.get("features")
-
+            self.model = joblib.load(self.model_path)
             self.model_loaded_date = datetime.now().isoformat()
-            # если при обучении мы сохраняем дату – прочитаем её
-            self.model_trained_date = model_data.get("model_trained_date")
-
-            print("✅ Модель успешно загружена")
+            ts = os.path.getmtime(self.model_path)
+            self.model_trained_date = datetime.fromtimestamp(ts).isoformat()
+            print("✅ Модель успешно загружена!")
             return True
-        except Exception as e:  # noqa: BLE001
-            print(f"❌ Ошибка при загрузке модели: {e}")
+        except Exception as e:
+            print(f"❌ ВНИМАНИЕ: модель не загружена! Ошибка: {str(e)}")
             return False
 
-    def fit_from_dataframe(
-        self,
-        df: pd.DataFrame,
-        target_column: str = "class",
-    ) -> Tuple[float, str]:
+    def fit_from_dataframe(self, df: pd.DataFrame, target_column: str = "class") -> tuple[float, str]:
         """
-        Обучение модели на DataFrame с теми же колонками, что и в train.csv.
-
-        Ожидается, что в df есть:
-        - столбец target_column ('class'),
-        - признак 'id' (будет проигнорирован),
-        - остальные признаки, как в исходном датасете.
+        Обучает модель заново на переданном DataFrame.
         """
-
         if target_column not in df.columns:
-            raise ValueError(f"В датафрейме нет столбца таргета '{target_column}'")
+            raise ValueError(f"Нет столбца '{target_column}'")
 
-        # отделяем таргет
+        X = df.drop(columns=[target_column], errors="ignore")
         y_raw = df[target_column]
+        y = (y_raw == "p").astype(int)
 
-        # убираем id и таргет из признаков
-        X = df.drop(columns=[target_column, "id"], errors="ignore")
-
-        # запомним список признаков (в таком порядке модель их и видит)
-        feature_names = list(X.columns)
-
-        # кодируем категориальные признаки
-        label_encoders: Dict[str, LabelEncoder] = {}
-        for col in X.columns:
-            le = LabelEncoder()
-            X[col] = le.fit_transform(X[col].astype(str))
-            label_encoders[col] = le
-
-        # кодируем таргет: e=0, p=1
-        target_encoder = LabelEncoder()
-        y = target_encoder.fit_transform(y_raw.astype(str))
-
-        # train / test split
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
+        categorical_features = list(X.columns)
+        preprocessor = ColumnTransformer(
+            transformers=[
+                ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_features),
+            ]
         )
 
-        model = RandomForestClassifier(
-            n_estimators=100,
-            random_state=42,
+        model = Pipeline(
+            steps=[
+                ("preprocessor", preprocessor),
+                ("classifier", RandomForestClassifier(n_estimators=100, random_state=42)),
+            ]
         )
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
         model.fit(X_train, y_train)
-        accuracy = model.score(X_test, y_test)
-
+        acc = float(model.score(X_test, y_test))
         now_iso = datetime.now().isoformat()
 
-        # сохраняем в pkl всё, что нужно для инференса
-        model_data: Dict[str, Any] = {
-            "model": model,
-            "label_encoders": label_encoders,
-            "features": feature_names,
-            "model_trained_date": now_iso,
-        }
+        joblib.dump(model, self.model_path)
 
-        joblib.dump(model_data, self.model_path)
-        print(f"💾 Модель сохранена в {self.model_path}")
-        print(f"📊 Точность на тесте: {accuracy:.4f}")
-
-        # обновляем состояние объекта
         self.model = model
-        self.label_encoders = label_encoders
-        self.features = feature_names
+        self.features = categorical_features
         self.model_trained_date = now_iso
         self.model_loaded_date = now_iso
 
-        return accuracy, now_iso
+        return acc, now_iso
+
+    def is_ready(self) -> bool:
+        """
+        Проверяет, загружена ли модель.
+        """
+        return self.model is not None
 
     def get_model_info(self) -> dict:
-        """Информация о модели (для эндпоинта /status)."""
+        """
+        Возвращает информацию о текущей модели.
+
+        Returns:
+            dict: информация о модели, включая:
+                - is_loaded: bool — загружена ли модель
+                - model_loaded_date: str — дата последней загрузки
+                - model_trained_date: str — дата последней тренировки
+                - features: list[str] — список признаков
+                - model_path: str — путь к файлу модели
+        """
         return {
             "is_loaded": self.model is not None,
             "model_loaded_date": self.model_loaded_date,
@@ -127,6 +110,6 @@ class ModelConfig:
             "features": self.features,
             "model_path": self.model_path,
         }
-        
+
 
 model_config = ModelConfig()

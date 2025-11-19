@@ -58,9 +58,11 @@ http://127.0.0.1:8002/docs
 ```
 
 ## Запуск проекта через Dockerfile
+Сборка Docker-образа
 ```
 docker build -t mushroom-api .
 ```
+Запуск контейнера
 ```
 docker run -p 8002:8002 mushroom-api
 ```
